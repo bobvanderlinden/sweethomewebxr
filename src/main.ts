@@ -5,7 +5,10 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader";
 import { XRButton } from "three/addons/webxr/XRButton";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory";
 
-async function loadModel(objUrl: string, mtlUrl: string): Promise<THREE.Mesh> {
+async function loadModel(
+  objUrl: string,
+  mtlUrl: string
+): Promise<THREE.Object3D> {
   const objLoader = new OBJLoader();
   const mtlLoader = new MTLLoader();
   const materials = await mtlLoader.loadAsync(mtlUrl);
@@ -53,8 +56,8 @@ async function run() {
   scene.add(floor);
 
   const controllerModelFactory = new XRControllerModelFactory();
-  const controller1 = createController(0, floor);
-  const controller2 = createController(1, floor);
+  createController(0, floor);
+  createController(1, floor);
 
   const house = await loadModel("home/home.obj", "home/home.mtl");
   house.scale.set(0.01, 0.01, 0.01);
@@ -77,12 +80,15 @@ async function run() {
   }
 
   function render() {
-    scene.dispatchEvent({ type: "render" });
+    scene.dispatchEvent({ type: "render" } as any);
     renderer.render(scene, camera);
   }
 
   function createController(index: number, floor: THREE.Mesh) {
     const controller = renderer.xr.getController(index);
+    if (!controller) {
+      return null;
+    }
     let gamepad: Gamepad | undefined = undefined;
     controller.addEventListener("connected", (event) => {
       controller.add(buildController(event.data));
@@ -109,7 +115,6 @@ async function run() {
 
     const raycaster = new THREE.Raycaster();
 
-    const buttons = gamepad?.buttons ?? [];
     let buttonStates: boolean[] = [];
 
     let isSelecting = false;
@@ -118,6 +123,7 @@ async function run() {
       const referenceSpace = renderer.xr.getReferenceSpace();
       if (!referenceSpace) return;
 
+      const buttons = gamepad?.buttons ?? [];
       const buttonPressed = buttons.map(
         (button, index) => button.pressed && !buttonStates[index]
       );
@@ -155,7 +161,7 @@ async function run() {
     controller.addEventListener("selectend", () => {
       isSelecting = false;
 
-      if (INTERSECTION) {
+      if (INTERSECTION && baseReferenceSpace) {
         const offsetPosition = {
           x: -INTERSECTION.x,
           y: -INTERSECTION.y,
