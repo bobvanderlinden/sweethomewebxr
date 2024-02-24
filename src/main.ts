@@ -4,6 +4,7 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader";
 import { MTLLoader } from "three/addons/loaders/MTLLoader";
 import { XRButton } from "three/addons/webxr/XRButton";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory";
+import { PointerLockControls } from "three/examples/jsm/Addons.js";
 
 async function loadModel(
   objUrl: string,
@@ -70,6 +71,25 @@ async function run() {
   });
 
   container.appendChild(renderer.domElement);
+
+  const pointerLockControls = new PointerLockControls(camera, document.body);
+
+  renderer.domElement.addEventListener("click", () => {
+    pointerLockControls.lock();
+  });
+
+  const keyboard: { [key: string]: boolean } = {};
+  document.addEventListener("keydown", (event) => {
+    keyboard[event.key] = true;
+    if (event.key === "Escape") {
+      pointerLockControls.unlock();
+    }
+  });
+
+  document.addEventListener("keyup", (event) => {
+    delete keyboard[event.key];
+  });
+
   document.body.appendChild(XRButton.createButton(renderer));
 
   function onWindowResize() {
@@ -82,6 +102,24 @@ async function run() {
   function render() {
     scene.dispatchEvent({ type: "render" } as any);
     renderer.render(scene, camera);
+
+    function bsign(b: boolean): number {
+      return b ? 1 : -1;
+    }
+    const forward = bsign(keyboard.w) - bsign(keyboard.s);
+    const right = bsign(keyboard.d) - bsign(keyboard.a);
+    const localDirection = new THREE.Vector3(forward, 0, right);
+    localDirection.normalize();
+
+    const cameraDirection = new THREE.Vector3();
+    camera.getWorldDirection(cameraDirection);
+    const velocity = new THREE.Vector3();
+    velocity.addScaledVector(cameraDirection, localDirection.x);
+    velocity.addScaledVector(
+      new THREE.Vector3(-cameraDirection.z, 0, cameraDirection.x),
+      localDirection.z
+    );
+    camera.position.addScaledVector(velocity, 0.1);
   }
 
   function createController(index: number, floor: THREE.Mesh) {
