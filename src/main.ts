@@ -6,6 +6,50 @@ import { XRButton } from "three/addons/webxr/XRButton";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory";
 import { PointerLockControls } from "three/examples/jsm/Addons.js";
 
+function exportDepthTexture(
+  renderer: THREE.WebGLRenderer,
+  depthTexture: THREE.DepthTexture
+) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, 0, 1);
+  const geometry = new THREE.PlaneGeometry(1, 1);
+
+  // Create a shader to convert the depthTexture to a grayscale image.
+  // Without this the depthTexture will be a single channel texture: red-scale.
+  const material = new THREE.ShaderMaterial({
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    // Reverse the depth value to get white for closeby and black for far away.
+    fragmentShader: `
+      uniform sampler2D depthTexture;
+      varying vec2 vUv;
+      void main() {
+        float depth = 1.0 - texture2D(depthTexture, vUv).r;
+        gl_FragColor = vec4(vec3(depth), 1.0);
+      }
+    `,
+    uniforms: {
+      depthTexture: { value: depthTexture },
+    },
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  scene.add(mesh);
+
+  camera.position.set(0, 0, 1);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+
+  const image = new Image();
+  image.src = renderer.domElement.toDataURL();
+  document.body.appendChild(image);
+}
+
 async function loadModel(
   objUrl: string,
   mtlUrl: string
@@ -30,8 +74,8 @@ async function run() {
   const camera = new THREE.PerspectiveCamera(
     50,
     window.innerWidth / window.innerHeight,
-    0.1,
-    10
+    2,
+    7
   );
   camera.position.set(0, 1, 3);
 
@@ -55,6 +99,25 @@ async function run() {
     })
   );
   scene.add(floor);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "p") {
+      event.preventDefault();
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+
+      const target = new THREE.WebGLRenderTarget(width, height, {});
+      target.depthTexture = new THREE.DepthTexture(width, height);
+      target.depthTexture.format = THREE.DepthFormat;
+      target.depthTexture.type = THREE.UnsignedInt248Type;
+      renderer.setRenderTarget(target);
+      renderer.clear();
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+
+      exportDepthTexture(renderer, target.depthTexture);
+    }
+  });
 
   const controllerModelFactory = new XRControllerModelFactory();
   createController(0, floor);
