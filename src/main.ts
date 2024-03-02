@@ -71,13 +71,9 @@ async function run() {
   document.body.appendChild(container);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x505050);
-  const camera = new THREE.PerspectiveCamera(
-    50,
-    window.innerWidth / window.innerHeight,
-    2,
-    7
-  );
-  camera.position.set(0, 1, 3);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 20);
+  camera.position.set(5, 1.6, 2.5);
+  camera.rotateY(-Math.PI);
 
   scene.add(new THREE.HemisphereLight(0xa5a5a5, 0x898989, 3));
 
