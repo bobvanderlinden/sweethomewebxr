@@ -5,6 +5,14 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader";
 import { XRButton } from "three/addons/webxr/XRButton";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory";
 import { PointerLockControls } from "three/examples/jsm/Addons.js";
+import { TeleportMarker } from "./TeleportMarker";
+
+const initialPosition = new THREE.Vector3(5, 0, 2.5);
+const initialQuaternion = new THREE.Quaternion().setFromAxisAngle(
+  { x: 0, y: 1, z: 0 },
+  0.25 * Math.PI
+);
+const defaultEyeHeight = 1.6;
 
 function exportDepthTexture(
   renderer: THREE.WebGLRenderer,
@@ -63,8 +71,348 @@ async function loadModel(
   return object;
 }
 
-let baseReferenceSpace: XRReferenceSpace | null = null;
 const tempMatrix = new THREE.Matrix4();
+
+function isGroundIntersection(intersection: THREE.Intersection): boolean {
+  console.log(intersection, intersection.object.name);
+  return (intersection.normal?.y ?? 0) > 0.9;
+}
+
+type RayCaster = (
+  ray: THREE.Ray,
+  near: number,
+  far: number
+) => THREE.Intersection | null;
+
+function createRayCaster(
+  intersectObject: THREE.Object3D,
+  recursive?: boolean
+): RayCaster {
+  const rayCaster = new THREE.Raycaster();
+  return (ray: THREE.Ray, near: number, far: number) => {
+    rayCaster.ray = ray;
+    rayCaster.near = near;
+    rayCaster.far = far;
+    return rayCaster.intersectObject(intersectObject, recursive)?.[0] ?? null;
+  };
+}
+
+class Arccaster {
+  constructor(
+    public gravity: THREE.Vector3,
+    public readonly raycaster: THREE.Raycaster = new THREE.Raycaster()
+  ) {}
+
+  intersectObject(
+    object: THREE.Object3D,
+    position: THREE.Vector3,
+    rotation: THREE.Quaternion
+  ): { trace: THREE.Vector3[]; intersection?: THREE.Intersection } {
+    position = position.clone();
+    const velocity = new THREE.Vector3(0, 0, -1);
+    velocity.applyQuaternion(rotation);
+
+    const trace: THREE.Vector3[] = [position.clone()];
+    const step = 0.2;
+    const ray = new THREE.Ray();
+    for (let x = 0; x < 50; x++) {
+      velocity.addScaledVector(this.gravity, step);
+      position.addScaledVector(velocity, step);
+
+      if (trace.length > 0) {
+        const lastPosition = trace[trace.length - 1];
+        ray.origin.copy(lastPosition);
+        ray.direction.copy(position).sub(lastPosition).normalize();
+        this.raycaster.ray = ray;
+        this.raycaster.near = 0;
+        this.raycaster.far = lastPosition.distanceTo(position);
+        const intersections = this.raycaster.intersectObject(object, true);
+        if (intersections.length > 0) {
+          const intersection = intersections[0];
+          trace.push(intersection.point);
+          return { trace, intersection };
+        }
+      }
+      trace.push(position.clone());
+    }
+    return { trace };
+  }
+}
+
+class TeleportationArc extends THREE.Object3D {
+  public readonly line: THREE.Line;
+  readonly geometry: THREE.BufferGeometry;
+  readonly material: THREE.LineBasicMaterial;
+  constructor(
+    public readonly arccaster: Arccaster,
+    public readonly marker: THREE.Object3D,
+    public validateIntersection: (
+      intersection: THREE.Intersection
+    ) => boolean = isGroundIntersection
+  ) {
+    super();
+    this.geometry = new THREE.BufferGeometry();
+    this.material = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+    this.line = new THREE.Line(this.geometry, this.material);
+    this.line.frustumCulled = false;
+  }
+
+  update(object: THREE.Object3D, angle: number) {
+    const position = new THREE.Vector3();
+    const rotation = new THREE.Quaternion();
+    this.getWorldPosition(position);
+    this.getWorldQuaternion(rotation);
+    const { intersection, trace } = this.arccaster.intersectObject(
+      object,
+      position,
+      rotation
+    );
+
+    this.geometry.setFromPoints(trace);
+
+    const hasIntersection =
+      !!intersection && this.validateIntersection(intersection);
+
+    if (hasIntersection) {
+      this.marker.position.copy(intersection.point);
+      if (intersection.normal) {
+        this.marker.setRotationFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+      }
+    }
+    this.marker.visible = hasIntersection;
+  }
+}
+
+class TeleportationControls {
+  isTeleporting: boolean = false;
+  teleportationAngle: number = 0;
+  constructor(
+    public readonly teleportationArc: TeleportationArc,
+    public controller: THREE.XRTargetRaySpace
+  ) {}
+
+  start() {
+    this.isTeleporting = true;
+  }
+
+  update(object: THREE.Object3D, angle: number = 0) {
+    if (this.isTeleporting) {
+      this.teleportationAngle = angle;
+      this.teleportationArc.position.copy(this.controller.position);
+      this.teleportationArc.rotation.copy(this.controller.rotation);
+      this.teleportationArc.update(object, angle);
+    }
+    this.teleportationArc.line.visible = this.isTeleporting;
+  }
+
+  _stop() {
+    this.isTeleporting = false;
+    this.teleportationArc.line.visible = false;
+    this.teleportationArc.marker.visible = false;
+  }
+
+  cancel() {
+    this._stop();
+  }
+
+  commit(session: ThreeXRSession) {
+    this._stop();
+
+    session.setOffset(
+      this.teleportationArc.marker.position,
+      this.teleportationAngle
+    );
+  }
+}
+
+async function requestReferenceSpace(
+  session: XRSession,
+  type: "local-floor"
+): Promise<XRReferenceSpace | null>;
+async function requestReferenceSpace(
+  session: XRSession,
+  type: "viewer"
+): Promise<XRReferenceSpace | null>;
+async function requestReferenceSpace(
+  session: XRSession,
+  type: XRReferenceSpaceType
+): Promise<XRReferenceSpace | XRBoundedReferenceSpace | null> {
+  try {
+    return await session.requestReferenceSpace(type);
+  } catch (e: unknown) {
+    console.warn(e);
+    if (e instanceof DOMException && e.name === "NotSupportedError") {
+      return null;
+    }
+    throw e;
+  }
+}
+
+async function requestLocalFloorReferenceSpace(session: XRSession) {
+  return await requestReferenceSpace(session, "local-floor");
+}
+
+async function requestViewerReferenceSpace(session: XRSession) {
+  console.log("Using viewer reference space");
+  const referenceSpace = await requestReferenceSpace(session, "viewer");
+  return referenceSpace?.getOffsetReferenceSpace(
+    new XRRigidTransform({ x: 0, y: -defaultEyeHeight, z: 0 })
+  );
+}
+
+async function initializeThreeXRSession(webxrManager: THREE.WebXRManager) {
+  const session = webxrManager.getSession();
+  if (!session) {
+    throw new Error("No session available");
+  }
+  const baseReferenceSpace =
+    (await requestLocalFloorReferenceSpace(session)) ??
+    (await requestViewerReferenceSpace(session));
+  if (!baseReferenceSpace) {
+    throw new Error("No supported reference space available");
+  }
+  return new ThreeXRSession(webxrManager, baseReferenceSpace);
+}
+
+class ThreeXRSession {
+  constructor(
+    public readonly webxrManager: THREE.WebXRManager,
+    public readonly baseReferenceSpace: XRReferenceSpace
+  ) {}
+
+  setOffset(_position: THREE.Vector3, angle: number) {
+    const rotation = new THREE.Quaternion();
+    rotation.setFromAxisAngle({ x: 0, y: 1, z: 0 }, -angle);
+    const position = new THREE.Vector3();
+    position.copy(_position).negate().applyQuaternion(rotation);
+    const offset = new XRRigidTransform(position, rotation);
+
+    offset.orientation.matrixTransform();
+    const offsetSpace = this.baseReferenceSpace.getOffsetReferenceSpace(offset);
+    this.webxrManager.setReferenceSpace(offsetSpace);
+  }
+}
+
+function buildController(data: XRInputSource) {
+  switch (data.targetRayMode) {
+    case "tracked-pointer":
+      return buildTrackedPointerController();
+    case "gaze":
+      return buildGazeController();
+    default:
+      throw new Error("Unknown controller type");
+  }
+}
+
+function buildTrackedPointerController(): THREE.Object3D {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, -1], 3)
+  );
+  geometry.setAttribute(
+    "color",
+    new THREE.Float32BufferAttribute([0.5, 0.5, 0.5, 0, 0, 0], 3)
+  );
+
+  const material = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    blending: THREE.AdditiveBlending,
+  });
+
+  return new THREE.Line(geometry, material);
+}
+
+function buildGazeController(): THREE.Object3D {
+  const geometry = new THREE.RingGeometry(0.02, 0.04, 32).translate(0, 0, -1);
+  const material = new THREE.MeshBasicMaterial({
+    opacity: 0.5,
+    transparent: true,
+  });
+  return new THREE.Mesh(geometry, material);
+}
+
+interface Disposable {
+  dispose(): void;
+}
+
+class ThreeXRConnectedController extends THREE.Object3D {
+  public readonly gamepad: Gamepad;
+  public readonly controllerMesh = new THREE.Object3D();
+
+  constructor(
+    public readonly controller: ThreeXRController,
+    inputSource: XRInputSource
+  ) {
+    super();
+    const gamepad = inputSource.gamepad;
+    if (!gamepad) {
+      throw new Error("Gamepad not available");
+    }
+    if (gamepad.axes.length < 4) {
+      throw new Error("Gamepad axes not available");
+    }
+    this.gamepad = inputSource.gamepad;
+    this.controllerMesh = buildController(inputSource);
+    this.add(this.controllerMesh);
+  }
+}
+
+class ThreeXRController extends THREE.Object3D {
+  public connectedController?: ThreeXRConnectedController;
+  constructor(
+    public readonly controller: THREE.XRTargetRaySpace,
+    public readonly grip: THREE.XRGripSpace
+  ) {
+    super();
+    this.handleControllerConnected = this.handleControllerConnected.bind(this);
+    this.handleControllerDisconnected =
+      this.handleControllerDisconnected.bind(this);
+    controller.addEventListener("connected", this.handleControllerConnected);
+    controller.addEventListener(
+      "disconnected",
+      this.handleControllerDisconnected
+    );
+  }
+
+  handleControllerConnected(event: { data: XRInputSource }) {
+    if (this.connectedController) {
+      throw new Error("Controller already connected");
+    }
+    this.connectedController = new ThreeXRConnectedController(this, event.data);
+    this.add(this.connectedController);
+  }
+
+  handleControllerDisconnected(_event: THREE.Event) {
+    if (!this.connectedController) {
+      return;
+    }
+    this.remove(this.connectedController);
+    this.connectedController = undefined;
+  }
+
+  dispose() {
+    this.controller.removeEventListener(
+      "connected",
+      this.handleControllerConnected
+    );
+    this.controller.removeEventListener(
+      "disconnected",
+      this.handleControllerDisconnected
+    );
+  }
+
+  static fromWebXRManager(xrManager: THREE.WebXRManager, index: number) {
+    const controller = xrManager.getController(index);
+    if (!controller) {
+      return null;
+    }
+    const grip = xrManager.getControllerGrip(index);
+    const controllerModelFactory = new XRControllerModelFactory();
+    grip.add(controllerModelFactory.createControllerModel(grip));
+    return new ThreeXRController(controller, grip);
+  }
+}
 
 async function run() {
   const container = document.createElement("div");
@@ -72,8 +420,10 @@ async function run() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x505050);
   const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 20);
-  camera.position.set(5, 1.6, 2.5);
-  camera.rotateY(-Math.PI);
+  camera.position.copy(initialPosition);
+  camera.position.add({ x: 0, y: defaultEyeHeight, z: 0 });
+
+  camera.quaternion.copy(initialQuaternion);
 
   scene.add(new THREE.HemisphereLight(0xa5a5a5, 0x898989, 3));
 
@@ -86,15 +436,15 @@ async function run() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
 
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(100, 100, 2, 2)
-      .rotateX(-Math.PI / 2)
-      .translate(0, 0.0001, 0),
-    new THREE.MeshBasicMaterial({
-      color: 0xbcbcbc,
-    })
-  );
-  scene.add(floor);
+  // const floor = new THREE.Mesh(
+  //   new THREE.PlaneGeometry(100, 100, 2, 2)
+  //     .rotateX(-Math.PI / 2)
+  //     .translate(0, 0.0001, 0),
+  //   new THREE.MeshBasicMaterial({
+  //     color: 0xbcbcbc,
+  //   })
+  // );
+  // scene.add(floor);
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "p") {
@@ -115,23 +465,39 @@ async function run() {
     }
   });
 
-  const controllerModelFactory = new XRControllerModelFactory();
-  createController(0, floor);
-  createController(1, floor);
-
   const house = await loadModel("home/home.obj", "home/home.mtl");
   house.scale.set(0.01, 0.01, 0.01);
   scene.add(house);
 
   renderer.setAnimationLoop(render);
+  onWindowResize();
   window.addEventListener("resize", onWindowResize);
-  renderer.xr.addEventListener("sessionstart", () => {
-    baseReferenceSpace = renderer.xr.getReferenceSpace();
+
+  renderer.xr.addEventListener("sessionstart", async () => {
+    const session = await initializeThreeXRSession(renderer.xr);
+
+    session.setOffset(initialPosition, 0.25 * Math.PI);
+
+    createController(0, scene, session);
+    createController(1, scene, session);
   });
 
   container.appendChild(renderer.domElement);
 
   const pointerLockControls = new PointerLockControls(camera, document.body);
+
+  pointerLockControls.addEventListener("lock", () => {
+    renderer.domElement.ownerDocument.addEventListener("mousedown", mousedown);
+  });
+
+  pointerLockControls.addEventListener("unlock", () => {
+    renderer.domElement.ownerDocument.removeEventListener(
+      "mousedown",
+      mousedown
+    );
+  });
+
+  function mousedown(_e: MouseEvent) {}
 
   renderer.domElement.addEventListener("click", () => {
     pointerLockControls.lock();
@@ -181,46 +547,71 @@ async function run() {
     camera.position.addScaledVector(velocity, 0.1);
   }
 
-  function createController(index: number, floor: THREE.Mesh) {
+  function createController(
+    index: number,
+    scene: THREE.Scene,
+    session: ThreeXRSession
+  ) {
     const controller = renderer.xr.getController(index);
     if (!controller) {
       return null;
     }
-    let gamepad: Gamepad | undefined = undefined;
-    controller.addEventListener("connected", (event) => {
-      controller.add(buildController(event.data));
-      scene.addEventListener("render", render);
-      gamepad = event.data.gamepad;
-    });
-    controller.addEventListener("disconnected", () => {
-      controller.remove(controller.children[0]);
-      scene.removeEventListener("render", render);
-    });
     scene.add(controller);
 
-    const controllerGrip = renderer.xr.getControllerGrip(index);
-    controllerGrip.add(
-      controllerModelFactory.createControllerModel(controllerGrip)
-    );
-    scene.add(controllerGrip);
+    const grip = renderer.xr.getControllerGrip(index);
+    const controllerModelFactory = new XRControllerModelFactory();
+    grip.add(controllerModelFactory.createControllerModel(grip));
+    scene.add(grip);
+    const threeController = new ThreeXRController(controller, grip);
 
-    const marker = new THREE.Mesh(
-      new THREE.CircleGeometry(0.25, 32).rotateX(-Math.PI / 2),
-      new THREE.MeshBasicMaterial({ color: 0xbcbcbc })
-    );
+    const marker = new TeleportMarker();
+    marker.visible = false;
     scene.add(marker);
+    const arc = new TeleportationArc(
+      new Arccaster(new THREE.Vector3(0, -0.1, 0)),
+      marker
+    );
+    scene.add(arc.line);
+    scene.add(arc);
+    const teleportationControls = new TeleportationControls(
+      arc,
+      threeController.controller
+    );
 
-    const raycaster = new THREE.Raycaster();
+    scene.addEventListener("render", update);
 
-    let buttonStates: boolean[] = [];
+    function update() {
+      const connectedController = threeController?.connectedController;
+      if (!connectedController) {
+        return;
+      }
+      const gamepad = connectedController.gamepad;
+      const [, , x, y] = connectedController.gamepad.axes;
+      const gamepadStickAngle = new THREE.Vector2(-y, -x).angle();
+      const controllerAngle = new THREE.Euler().setFromQuaternion(
+        threeController.controller.quaternion,
+        "YXZ"
+      ).y;
+      const teleportAngle = gamepadStickAngle + controllerAngle;
 
-    let isSelecting = false;
-    let INTERSECTION: THREE.Vector3 | undefined = undefined;
-    function render() {
-      const referenceSpace = renderer.xr.getReferenceSpace();
-      if (!referenceSpace) return;
+      if (teleportationControls.isTeleporting) {
+        if (x === 0 && y === 0) {
+          if (marker.visible) {
+            teleportationControls.commit(session);
+          } else {
+            teleportationControls.cancel();
+          }
+        } else {
+          teleportationControls.update(house, teleportAngle);
+        }
+      } else {
+        if (Math.sqrt(x * x + y * y) > 0.5) {
+          teleportationControls.start();
+        }
+      }
 
       const buttons = gamepad?.buttons ?? [];
+      const buttonStates = gamepad.buttons.map((button) => button.pressed);
       const buttonPressed = buttons.map(
         (button, index) => button.pressed && !buttonStates[index]
       );
@@ -231,88 +622,9 @@ async function run() {
       if (buttonPressed?.[4]) {
         house.translateY(2.5);
       }
-
-      buttonStates = buttons.map((button) => button.pressed);
-
-      INTERSECTION = undefined;
-      if (isSelecting) {
-        tempMatrix.identity().extractRotation(controller.matrixWorld);
-
-        raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
-        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-
-        const intersects = raycaster.intersectObjects([floor]);
-
-        if (intersects.length > 0) {
-          INTERSECTION = intersects[0].point;
-        }
-      }
-
-      if (INTERSECTION) marker.position.copy(INTERSECTION);
-
-      marker.visible = INTERSECTION !== undefined;
     }
-    controller.addEventListener("selectstart", () => {
-      isSelecting = true;
-    });
-    controller.addEventListener("selectend", () => {
-      isSelecting = false;
 
-      if (INTERSECTION && baseReferenceSpace) {
-        const offsetPosition = {
-          x: -INTERSECTION.x,
-          y: -INTERSECTION.y,
-          z: -INTERSECTION.z,
-          w: 1,
-        };
-        const offsetRotation = new THREE.Quaternion();
-        const transform = new XRRigidTransform(offsetPosition, offsetRotation);
-        const teleportSpaceOffset =
-          baseReferenceSpace.getOffsetReferenceSpace(transform);
-        renderer.xr.setReferenceSpace(teleportSpaceOffset);
-      }
-    });
-
-    return controller;
-  }
-
-  function buildController(data: XRInputSource) {
-    switch (data.targetRayMode) {
-      case "tracked-pointer":
-        return buildTrackedPointerController();
-      case "gaze":
-        return buildGazeController();
-      default:
-        throw new Error("Unknown controller type");
-    }
-  }
-
-  function buildTrackedPointerController(): THREE.Object3D {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, -1], 3)
-    );
-    geometry.setAttribute(
-      "color",
-      new THREE.Float32BufferAttribute([0.5, 0.5, 0.5, 0, 0, 0], 3)
-    );
-
-    const material = new THREE.LineBasicMaterial({
-      vertexColors: true,
-      blending: THREE.AdditiveBlending,
-    });
-
-    return new THREE.Line(geometry, material);
-  }
-
-  function buildGazeController(): THREE.Object3D {
-    const geometry = new THREE.RingGeometry(0.02, 0.04, 32).translate(0, 0, -1);
-    const material = new THREE.MeshBasicMaterial({
-      opacity: 0.5,
-      transparent: true,
-    });
-    return new THREE.Mesh(geometry, material);
+    return threeController;
   }
 }
 
