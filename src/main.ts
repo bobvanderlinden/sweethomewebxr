@@ -71,30 +71,9 @@ async function loadModel(
   return object;
 }
 
-const tempMatrix = new THREE.Matrix4();
-
 function isGroundIntersection(intersection: THREE.Intersection): boolean {
   console.log(intersection, intersection.object.name);
   return (intersection.normal?.y ?? 0) > 0.9;
-}
-
-type RayCaster = (
-  ray: THREE.Ray,
-  near: number,
-  far: number
-) => THREE.Intersection | null;
-
-function createRayCaster(
-  intersectObject: THREE.Object3D,
-  recursive?: boolean
-): RayCaster {
-  const rayCaster = new THREE.Raycaster();
-  return (ray: THREE.Ray, near: number, far: number) => {
-    rayCaster.ray = ray;
-    rayCaster.near = near;
-    rayCaster.far = far;
-    return rayCaster.intersectObject(intersectObject, recursive)?.[0] ?? null;
-  };
 }
 
 class Arccaster {
@@ -330,10 +309,6 @@ function buildGazeController(): THREE.Object3D {
     transparent: true,
   });
   return new THREE.Mesh(geometry, material);
-}
-
-interface Disposable {
-  dispose(): void;
 }
 
 class ThreeXRConnectedController extends THREE.Object3D {
