@@ -4,8 +4,12 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader";
 import { MTLLoader } from "three/addons/loaders/MTLLoader";
 import { XRButton } from "three/addons/webxr/XRButton";
 import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory";
-import { PointerLockControls } from "three/examples/jsm/Addons.js";
+import {
+  PointerLockControls,
+  RoomEnvironment,
+} from "three/examples/jsm/Addons.js";
 import { TeleportMarker } from "./TeleportMarker";
+import lightPositions from "./lights";
 
 const initialPosition = new THREE.Vector3(5, 0, 2.5);
 const initialQuaternion = new THREE.Quaternion().setFromAxisAngle(
@@ -392,34 +396,52 @@ class ThreeXRController extends THREE.Object3D {
 async function run() {
   const container = document.createElement("div");
   document.body.appendChild(container);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.xr.enabled = true;
+
+  const environment = new RoomEnvironment();
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x505050);
+  scene.background = new THREE.Color(0xbbbbbb);
+  scene.environment = pmremGenerator.fromScene(environment).texture;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 20);
   camera.position.copy(initialPosition);
   camera.position.add({ x: 0, y: defaultEyeHeight, z: 0 });
 
   camera.quaternion.copy(initialQuaternion);
 
-  scene.add(new THREE.HemisphereLight(0xa5a5a5, 0x898989, 3));
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0xffffff, 0.3);
+  hemiLight.position.set(0, 500, 0);
+  scene.add(hemiLight);
 
-  const light = new THREE.DirectionalLight(0xffffff, 3);
-  light.position.set(0, 6, 0);
-  scene.add(light);
+  function createLight(x: number, y: number, z: number) {
+    const light = new THREE.Object3D();
+    light.name = "light";
+    light.position.set(x, y, z);
+    // Lights look like cubes.
+    const lightGeometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+    const lightMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const lightMesh = new THREE.Mesh(lightGeometry, lightMaterial);
+    lightMesh.castShadow = false;
+    light.add(lightMesh);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.xr.enabled = true;
+    const pointLight = new THREE.PointLight(0xfff1f0, 0.8, 0, 1.5);
+    pointLight.castShadow = true;
+    light.add(pointLight);
 
-  // const floor = new THREE.Mesh(
-  //   new THREE.PlaneGeometry(100, 100, 2, 2)
-  //     .rotateX(-Math.PI / 2)
-  //     .translate(0, 0.0001, 0),
-  //   new THREE.MeshBasicMaterial({
-  //     color: 0xbcbcbc,
-  //   })
-  // );
-  // scene.add(floor);
+    scene.add(light);
+  }
+
+  for (const lightPosition of lightPositions) {
+    createLight(...lightPosition);
+  }
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "p") {
@@ -442,6 +464,7 @@ async function run() {
 
   const house = await loadModel("home/home.obj", "home/home.mtl");
   house.scale.set(0.01, 0.01, 0.01);
+  house.castShadow = true;
   scene.add(house);
 
   renderer.setAnimationLoop(render);
@@ -472,7 +495,41 @@ async function run() {
     );
   });
 
-  function mousedown(_e: MouseEvent) {}
+  function mousedown(_e: MouseEvent) {
+    const rayCaster = new THREE.Raycaster();
+    rayCaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    rayCaster.ray.origin.copy(camera.position);
+    rayCaster.ray.direction
+      .copy(camera.getWorldDirection(new THREE.Vector3()))
+      .normalize();
+    const intersections = rayCaster.intersectObject(scene, true);
+    if (intersections.length === 0) {
+      return;
+    }
+
+    const intersection = intersections[0];
+
+    if (intersection.object?.parent?.name === "light") {
+      scene.remove(intersection.object.parent);
+      return;
+    }
+    if (!intersection.normal) {
+      return;
+    }
+
+    const position = intersection.point.addScaledVector(
+      intersection.normal,
+      0.1
+    );
+
+    createLight(position.x, position.y, position.z);
+
+    console.log(
+      scene
+        .getObjectsByProperty("name", "light")
+        .map((o) => o.position.toArray())
+    );
+  }
 
   renderer.domElement.addEventListener("click", () => {
     pointerLockControls.lock();
