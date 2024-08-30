@@ -561,41 +561,18 @@ async function run() {
         return;
       }
       const gamepad = connectedController.gamepad;
-      const [, , x, y] = connectedController.gamepad.axes;
-      const gamepadStickAngle = new THREE.Vector2(-y, -x).angle();
-      const controllerAngle = new THREE.Euler().setFromQuaternion(
-        threeController.controller.quaternion,
-        "YXZ"
-      ).y;
-      const teleportAngle = gamepadStickAngle + controllerAngle;
+      const teleportButton = gamepad.buttons[0].pressed;
 
       if (teleportationControls.isTeleporting) {
-        if (x === 0 && y === 0) {
-          if (marker.visible) {
-            teleportationControls.commit(session);
-          } else {
-            teleportationControls.cancel();
-          }
+        if (teleportButton) {
+          teleportationControls.update(house, 0);
         } else {
-          teleportationControls.update(house, teleportAngle);
+          teleportationControls.commit(session);
         }
       } else {
-        if (Math.sqrt(x * x + y * y) > 0.5) {
+        if (teleportButton) {
           teleportationControls.start();
         }
-      }
-
-      const buttons = gamepad?.buttons ?? [];
-      const buttonStates = gamepad.buttons.map((button) => button.pressed);
-      const buttonPressed = buttons.map(
-        (button, index) => button.pressed && !buttonStates[index]
-      );
-
-      if (buttonPressed?.[5]) {
-        house.translateY(-2.5);
-      }
-      if (buttonPressed?.[4]) {
-        house.translateY(2.5);
       }
     }
 
